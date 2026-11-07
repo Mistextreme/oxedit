@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import toast from 'react-hot-toast';
-import { AlertTriangle, Check, Copy, CopyPlus, Eye, EyeOff, FileDown, GitCompare, ImageOff, Pencil, Search, Trash2, Undo2 } from 'lucide-react';
+import { AlertTriangle, Check, ChevronDown, ChevronUp, Copy, CopyPlus, Eye, EyeOff, FileDown, FileJson, FolderSearch, GitCompare, ImageOff, Pencil, Search, Trash2, Undo2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -16,8 +16,11 @@ import { AddEntryDialog } from '@/components/AddEntryDialog';
 import { BlipChip } from '@/components/BlipChip';
 import { Hint } from '@/components/InfoHint';
 import { ImagePickerModal } from '@/components/ImagePickerModal';
+import { MissingImagesModal } from '@/components/MissingImagesModal';
 import { useApp } from '@/stores/appStore';
 import { entryKeys, readField, duplicateKeys } from '@/engine/editModel';
+import { findMissingImages } from '@/engine/missingImages';
+import { exportMissing, missingAsText } from '@/services/imageSearch';
 import { SCHEMAS, FILE_LABELS, formFieldsFor, resolveImage } from '@/engine/schemaRegistry';
 import type { SchemaField } from '@/engine/editModel';
 import type { DataFileName } from '@/services/fileSystem';
@@ -73,15 +76,31 @@ export function DataFilePage({ file }: { file: DataFileName }) {
   const [showFullDiff, setShowFullDiff] = useState(false);
   const [bulkEditOpen, setBulkEditOpen] = useState(false);
   const [pickerFor, setPickerFor] = useState<{ entryKey: string; imageName: string } | null>(null);
+  const images = useApp((s) => s.images);
+  const missing = useMemo(() => (model ? findMissingImages(file, model, images) : []), [file, model, images]);
+  const missingKeys = useMemo(() => new Set(missing.map((m) => m.entryKey)), [missing]);
+  const [onlyMissing, setOnlyMissing] = useState(false);
+  const [missingOpen, setMissingOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+
+  const copyMissing = async () => {
+    try {
+      await navigator.clipboard.writeText(missingAsText(missing));
+      toast.success(`Copied ${missing.length} file names`);
+    } catch {
+      toast.error('Clipboard blocked by browser');
+    }
+  };
 
   const filtered = useMemo(() => {
     const q = query.toLowerCase();
     return keys.filter((k) => {
+      if (onlyMissing && !missingKeys.has(k)) return false;
       if (!q) return true;
       const label = String(readField(model!, k, schema.labelKey) ?? '');
       return k.toLowerCase().includes(q) || label.toLowerCase().includes(q);
     });
-  }, [keys, query, model, schema.labelKey]);
+  }, [keys, query, model, schema.labelKey, onlyMissing, missingKeys]);
 
   const active = selected && keys.includes(selected) ? selected : filtered[0] ?? null;
 
@@ -194,6 +213,25 @@ export function DataFilePage({ file }: { file: DataFileName }) {
               <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
               <Input className="h-8 pl-7 text-xs" placeholder="Search…" value={query} onChange={(e) => setQuery(e.target.value)} />
             </div>
+            {schema.images && (
+              <Hint text={onlyMissing ? 'Show all entries' : `Show only entries without an image (${missing.length})`}>
+                <Button
+                  variant={onlyMissing ? 'default' : 'ghost'}
+                  size="icon"
+                  className="relative h-8 w-8 shrink-0"
+                  aria-pressed={onlyMissing}
+                  aria-label="Only entries missing an image"
+                  onClick={() => setOnlyMissing((v) => !v)}
+                >
+                  <ImageOff />
+                  {missing.length > 0 && !onlyMissing && (
+                    <span className="absolute -right-1 -top-1 min-w-4 rounded-full bg-destructive px-1 text-[9px] font-semibold leading-4 text-destructive-foreground">
+                      {missing.length > 99 ? '99+' : missing.length}
+                    </span>
+                  )}
+                </Button>
+              </Hint>
+            )}
             <AddEntryDialog file={file} schema={schema} />
           </div>
 
@@ -284,8 +322,61 @@ export function DataFilePage({ file }: { file: DataFileName }) {
                 })}
               </div>
             ))}
-            {filtered.length === 0 && <div className="p-4 text-center text-xs text-muted-foreground">No entries</div>}
+            {filtered.length === 0 && (
+              <div className="p-4 text-center text-xs text-muted-foreground">
+                {onlyMissing && !query ? 'Every entry has an image' : 'No entries'}
+              </div>
+            )}
           </div>
+
+          {schema.images && missing.length > 0 && (
+            <div className="border-t border-border bg-muted/10">
+              <button
+                type="button"
+                onClick={() => setMissingOpen((v) => !v)}
+                aria-expanded={missingOpen}
+                className="flex w-full items-center justify-between px-3 py-2 text-xs font-medium hover:bg-accent"
+              >
+                <span className="flex items-center gap-1.5">
+                  <ImageOff className="h-3.5 w-3.5 text-destructive" />
+                  Missing images
+                  <Badge variant="destructive" className="px-1.5 py-0 text-[10px]">{missing.length}</Badge>
+                </span>
+                {missingOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
+              </button>
+              {missingOpen && (
+                <ul className="max-h-40 overflow-auto px-3 pb-1">
+                  {missing.map((m) => (
+                    <li key={m.entryKey}>
+                      <button
+                        type="button"
+                        onClick={() => setSelected(m.entryKey)}
+                        className="block w-full truncate rounded px-1 py-0.5 text-left font-mono text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
+                        title={m.label || m.entryKey}
+                      >
+                        {m.expectedName}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="flex items-center gap-1 px-2 pb-2 pt-1">
+                <Button size="sm" className="h-7 flex-1" onClick={() => setSearchOpen(true)}>
+                  <FolderSearch className="h-3 w-3" /> Search in folder
+                </Button>
+                <Hint text="Copy file names">
+                  <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Copy missing file names" onClick={copyMissing}>
+                    <Copy className="h-3 w-3" />
+                  </Button>
+                </Hint>
+                <Hint text="Export list as JSON">
+                  <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Export missing list as JSON" onClick={() => exportMissing(missing, 'json', file)}>
+                    <FileJson className="h-3 w-3" />
+                  </Button>
+                </Hint>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Editor */}
@@ -336,6 +427,8 @@ export function DataFilePage({ file }: { file: DataFileName }) {
           onClose={() => setPickerFor(null)}
         />
       )}
+
+      {searchOpen && <MissingImagesModal file={file} items={missing} onClose={() => setSearchOpen(false)} />}
     </div>
   );
 }
